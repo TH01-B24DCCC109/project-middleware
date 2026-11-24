@@ -1,0 +1,12 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq_demo
+    ports:
+      - "5672:5672"   # Cổng giao tiếp cho ứng dụng Node.js
+      - "15672:15672" # Cổng giao diện quản lý trên trình duyệt
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq # Lưu trữ bền vững dữ liệu hàng đợi
+
+volumes:
+  rabbitmq_data:

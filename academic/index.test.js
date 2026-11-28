@@ -1,6 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { callFinance, createAcademicApp, validateTuitionRequest } = require('./index');
+const { EventEmitter } = require('events');
+const {
+    callFinance,
+    createAcademicApp,
+    createRabbitMqPublisher,
+    validateTuitionRequest
+} = require('./index');
 
 async function startServer(t, app) {
     const server = app.listen(0, '127.0.0.1');
@@ -119,4 +125,91 @@ test('rejects invalid sync input before contacting Finance', async t => {
     assert.equal(body.success, false);
     assert.equal(calledFinance, false);
     assert.equal(events[0][3], 'REJECTED');
+});
+
+test('publishes a persistent message to a durable queue and waits for broker confirmation', async () => {
+    const calls = [];
+    const fakeChannel = new EventEmitter();
+    fakeChannel.assertQueue = async (...args) => calls.push(['assertQueue', ...args]);
+    fakeChannel.sendToQueue = (...args) => {
+        calls.push(['sendToQueue', ...args.slice(0, 3)]);
+        args[3](null);
+        return true;
+    };
+    const fakeConnection = new EventEmitter();
+    fakeConnection.createConfirmChannel = async () => fakeChannel;
+    fakeConnection.close = async () => {};
+    const publish = createRabbitMqPublisher({
+        url: 'amqp://test',
+        queue: 'tuition.test',
+        connect: async () => fakeConnection
+    });
+    const payload = {
+        requestId: 'rabbit-request-1',
+        studentId: 'SV001',
+        term: 'HK1-2026',
+        amount: 5000000
+    };
+
+    const result = await publish(payload);
+
+    assert.deepEqual(calls[0], ['assertQueue', 'tuition.test', { durable: true }]);
+    assert.equal(calls[1][0], 'sendToQueue');
+    assert.equal(calls[1][1], 'tuition.test');
+    assert.equal(calls[1][2].toString(), JSON.stringify(payload));
+    assert.equal(calls[1][3].persistent, true);
+    assert.equal(calls[1][3].messageId, payload.requestId);
+    assert.deepEqual(result, { queue: 'tuition.test', messageId: payload.requestId });
+});
+
+test('returns accepted only after the RabbitMQ publisher confirms the message', async t => {
+    const events = [];
+    let publishedPayload;
+    const baseUrl = await startServer(t, createAcademicApp({
+        publishTuition: async payload => {
+            publishedPayload = payload;
+            return { queue: 'tuition.test', messageId: payload.requestId };
+        },
+        log: (...event) => events.push(event)
+    }));
+
+    const response = await fetch(`${baseUrl}/api/academic/tuition/async`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'x-request-id': 'academic-async-1'
+        },
+        body: JSON.stringify({ studentId: 'SV001', term: 'HK1-2026', amount: '5000000' })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 202);
+    assert.equal(body.status, 'PUBLISHED');
+    assert.equal(body.queue, 'tuition.test');
+    assert.equal(publishedPayload.requestId, 'academic-async-1');
+    assert.equal(publishedPayload.amount, 5000000);
+    assert.equal(events[0][3], 'SENT');
+    assert.equal(events[0][4], 'PUBLISHED');
+});
+
+test('reports broker publish failure as unavailable', async t => {
+    const events = [];
+    const baseUrl = await startServer(t, createAcademicApp({
+        publishTuition: async () => {
+            throw new Error('broker unavailable');
+        },
+        log: (...event) => events.push(event)
+    }));
+
+    const response = await fetch(`${baseUrl}/api/academic/tuition/async`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ studentId: 'SV001', term: 'HK1-2026', amount: 5000000 })
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 503);
+    assert.equal(body.status, 'PUBLISH_FAILED');
+    assert.equal(events[0][3], 'PROCESSED');
+    assert.equal(events[0][4], 'PUBLISH_FAILED');
 });

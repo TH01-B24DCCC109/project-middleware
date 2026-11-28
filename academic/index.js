@@ -1,9 +1,12 @@
 const express = require('express');
 const crypto = require('crypto');
+const amqp = require('amqplib');
 const { writeLog } = require('../shared/logger');
 
 const PORT = Number(process.env.PORT || 3001);
 const FINANCE_URL = (process.env.FINANCE_URL || 'http://localhost:3002').replace(/\/+$/, '');
+const AMQP_URL = process.env.AMQP_URL || 'amqp://localhost:5672';
+const TUITION_QUEUE = process.env.TUITION_QUEUE || 'tuition.create';
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 3000);
 const RETRY_COUNT = Number(process.env.RETRY_COUNT || 2);
 
@@ -99,7 +102,92 @@ async function callFinance(payload) {
     throw lastError;
 }
 
-function createAcademicApp({ financeRequest = callFinance, log = writeLog } = {}) {
+function createRabbitMqPublisher({
+    url = AMQP_URL,
+    queue = TUITION_QUEUE,
+    connect = amqp.connect
+} = {}) {
+    let connection = null;
+    let channel = null;
+    let channelPromise = null;
+
+    async function getChannel() {
+        if (channel) return channel;
+        if (!channelPromise) {
+            channelPromise = (async () => {
+                const nextConnection = await connect(url);
+                connection = nextConnection;
+                nextConnection.on('error', error => {
+                    console.error(`RabbitMQ connection error: ${error.message}`);
+                });
+                nextConnection.once('close', () => {
+                    if (connection === nextConnection) {
+                        connection = null;
+                        channel = null;
+                        channelPromise = null;
+                    }
+                });
+
+                try {
+                    const nextChannel = await nextConnection.createConfirmChannel();
+                    channel = nextChannel;
+                    nextChannel.on('error', error => {
+                        console.error(`RabbitMQ channel error: ${error.message}`);
+                    });
+                    nextChannel.once('close', () => {
+                        if (channel === nextChannel) {
+                            channel = null;
+                            channelPromise = null;
+                        }
+                    });
+                    await nextChannel.assertQueue(queue, { durable: true });
+                    return nextChannel;
+                } catch (error) {
+                    if (connection === nextConnection) {
+                        connection = null;
+                        channel = null;
+                        channelPromise = null;
+                    }
+                    await nextConnection.close().catch(closeError => {
+                        console.error(`RabbitMQ connection close error: ${closeError.message}`);
+                    });
+                    throw error;
+                }
+            })().catch(error => {
+                channelPromise = null;
+                throw error;
+            });
+        }
+        return channelPromise;
+    }
+
+    return async function publishTuition(payload) {
+        const activeChannel = await getChannel();
+        await new Promise((resolve, reject) => {
+            activeChannel.sendToQueue(
+                queue,
+                Buffer.from(JSON.stringify(payload)),
+                {
+                    persistent: true,
+                    contentType: 'application/json',
+                    messageId: payload.requestId,
+                    timestamp: Date.now(),
+                    type: 'tuition.create'
+                },
+                error => error ? reject(error) : resolve()
+            );
+        });
+        return { queue, messageId: payload.requestId };
+    };
+}
+
+const publishTuitionToRabbitMq = createRabbitMqPublisher();
+
+function createAcademicApp({
+    financeRequest = callFinance,
+    publishTuition = publishTuitionToRabbitMq,
+    log = writeLog
+} = {}) {
     const app = express();
     app.use(express.json());
 
@@ -154,11 +242,60 @@ function createAcademicApp({ financeRequest = callFinance, log = writeLog } = {}
         }
     });
 
+    app.post('/api/academic/tuition/async', async (req, res) => {
+        const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+            ? req.body
+            : {};
+        const suppliedRequestId = req.headers['x-request-id'] || body.requestId;
+        const requestId = typeof suppliedRequestId === 'string' && suppliedRequestId.trim()
+            ? suppliedRequestId.trim()
+            : crypto.randomUUID();
+        const payload = {
+            requestId,
+            studentId: typeof body.studentId === 'string' ? body.studentId.trim() : body.studentId,
+            term: typeof body.term === 'string' ? body.term.trim() : body.term,
+            amount: body.amount,
+            description: typeof body.description === 'string' && body.description.trim()
+                ? body.description.trim()
+                : `Học phí kỳ ${body.term || ''}`.trim()
+        };
+
+        const validationError = validateTuitionRequest(payload);
+        if (validationError) {
+            log('Academic', 'ASYNC', requestId, 'REJECTED', 'VALIDATION_ERROR', validationError);
+            return res.status(400).json({ success: false, requestId, message: validationError });
+        }
+        payload.amount = Number(payload.amount);
+
+        try {
+            const published = await publishTuition(payload);
+            log('Academic', 'ASYNC', requestId, 'SENT', 'PUBLISHED', `Đã xác nhận gửi vào queue ${published.queue}`);
+            return res.status(202).json({
+                success: true,
+                requestId,
+                mode: 'ASYNC',
+                status: 'PUBLISHED',
+                queue: published.queue
+            });
+        } catch (error) {
+            log('Academic', 'ASYNC', requestId, 'PROCESSED', 'PUBLISH_FAILED', error.message);
+            return res.status(503).json({
+                success: false,
+                requestId,
+                mode: 'ASYNC',
+                status: 'PUBLISH_FAILED',
+                message: 'Không thể gửi yêu cầu vào RabbitMQ'
+            });
+        }
+    });
+
     app.get('/api/academic/health', (_req, res) => {
         res.json({
             service: 'Academic',
-            mode: 'SYNC',
+            modes: ['SYNC', 'ASYNC'],
             financeUrl: FINANCE_URL,
+            rabbitMqUrl: AMQP_URL,
+            tuitionQueue: TUITION_QUEUE,
             circuitBreakerOpen: Date.now() < circuitOpenUntil
         });
     });
@@ -174,4 +311,10 @@ if (require.main === module) {
     });
 }
 
-module.exports = { app, callFinance, createAcademicApp, validateTuitionRequest };
+module.exports = {
+    app,
+    callFinance,
+    createAcademicApp,
+    createRabbitMqPublisher,
+    validateTuitionRequest
+};

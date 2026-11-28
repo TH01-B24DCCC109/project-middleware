@@ -30,7 +30,28 @@ Academic gọi Finance tại `http://localhost:3002` theo mặc định; có th�
 
 Lịch sử giao dịch đồng bộ được lưu tại `shared/system_logs.json`, danh sách học phí tại `finance/tuition_records.json`.
 
-Chạy kiểm thử đồng bộ bằng `npm test` trong từng thư mục `academic` và `finance`.
+## Luồng bất đồng bộ Academic → RabbitMQ (producer)
+
+Khởi động RabbitMQ theo hướng dẫn hạ tầng bên dưới, sau đó chạy Academic:
+
+```bash
+cd academic
+npm install
+npm start
+```
+
+Gửi yêu cầu vào queue:
+
+```bash
+curl -X POST http://localhost:3001/api/academic/tuition/async \
+  -H "Content-Type: application/json" \
+  -H "x-request-id: demo-async-001" \
+  -d '{"studentId":"SV001","term":"HK1-2026","amount":5000000}'
+```
+
+Academic mặc định kết nối `amqp://localhost:5672` và tạo queue bền vững `tuition.create`. Có thể cấu hình bằng `AMQP_URL` và `TUITION_QUEUE`. Message được gửi ở chế độ persistent; API trả HTTP 202 sau khi RabbitMQ xác nhận publisher confirm. Kiểm tra message trong RabbitMQ Management UI tại `http://localhost:15672` (thông tin đăng nhập mặc định của image là `guest` / `guest`). Phần này chỉ publish; Finance Consumer thuộc công việc 3.
+
+Chạy kiểm thử bằng `npm test` trong từng thư mục `academic` và `finance`.
 
 ## 1. Hướng dẫn khởi chạy hạ tầng (RabbitMQ)
 Mở Terminal tại thư mục gốc `project-middleware` và chạy:

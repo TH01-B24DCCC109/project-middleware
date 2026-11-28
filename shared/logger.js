@@ -11,10 +11,9 @@ function writeLog(service, mode, requestId, action, status, note = '') {
     // Đọc dữ liệu log cũ từ file JSON
     let logs = [];
     if (fs.existsSync(logFile)) {
-        try {
-            logs = JSON.parse(fs.readFileSync(logFile, 'utf8'));
-        } catch (e) {
-            logs = [];
+        logs = JSON.parse(fs.readFileSync(logFile, 'utf8'));
+        if (!Array.isArray(logs)) {
+            throw new Error(`Tệp log phải có định dạng mảng JSON: ${logFile}`);
         }
     }
 
@@ -36,7 +35,7 @@ function writeLog(service, mode, requestId, action, status, note = '') {
         record.sentAt = now;
     } else if (action === 'RECEIVED') {
         record.receivedAt = now;
-    } else if (action === 'PROCESSED' || action === 'DUPLICATE_IGNORED') {
+    } else if (action === 'PROCESSED') {
         record.processedAt = now;
     }
 

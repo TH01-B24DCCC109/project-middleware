@@ -1,0 +1,22 @@
+[
+    {
+        "tuitionId":  "FEE-1795839361391-12d9fd2b",
+        "requestId":  "12d9fd2b-2930-469e-a47e-4609b8b16967",
+        "studentId":  "SV001",
+        "term":  "HK1-2026",
+        "amount":  5000000,
+        "description":  "H?c phï¿½ th? nghi?m",
+        "mode":  "SYNC",
+        "createdAt":  "2026-11-28T04:16:01.391Z"
+    },
+    {
+        "tuitionId":  "FEE-1795840316982-86b6ccfb",
+        "requestId":  "86b6ccfb-1425-4929-9743-97417feaacf6",
+        "studentId":  "SV-SYNC-001",
+        "term":  "HK1-2026",
+        "amount":  3500000,
+        "description":  "Há»c phÃ­ Ä‘á»“ng bá»™",
+        "mode":  "SYNC",
+        "createdAt":  "2026-11-28T04:31:56.982Z"
+    }
+]
